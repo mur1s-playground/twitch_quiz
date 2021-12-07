@@ -1,0 +1,5 @@
+SRC was built using the following library versions
+
+- openssl 1.1.1k
+- SDL2-2.0.18-VC
+- SDL2_ttf-2.0.15-VC
