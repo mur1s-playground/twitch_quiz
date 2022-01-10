@@ -3,79 +3,63 @@
 #include <vector>
 #include <map>
 
+#include "mutex.h"
 #include "irc_client.h"
 
 using namespace std;
 
-struct quiz_cfg {
-	unsigned int pos_x;
-	unsigned int pos_y;
-	unsigned int width;
-	unsigned int height;
-};
-
-struct quiz_answer {
-	unsigned int answer_id;
-	LONG		 time_ms;
-};
-
-struct question_result {
-	string		name;
-	float		time_s;
-	unsigned int count;
+struct quiz_distribution_data {
+    unsigned int        user_id;
+    unsigned int        param;
+    unsigned int        participants;
+    unsigned int        count[4];
 };
 
 struct quiz_participant_data {
-	map<unsigned int, struct quiz_answer> answers;
-
-	struct mutex lock;
-
-	unsigned int correct_answers;
-	float		 time_s;
+    map<string, unsigned int>::iterator name_link;
+    unsigned int                        answer_id;
+    long                                time_ms;
+    bool                                active;
 };
 
-struct quiz_question {
-	char* question;
-	char* answer_a;
-	char* answer_b;
-	char* answer_c;
-	char* answer_d;
+struct quiz_participant_result_data {
+    char                                *name;
+    unsigned int                        correct_answers;
+    float                               total_time;
+};
 
-	unsigned int correct_id;
+struct quiz_process_args {
+    unsigned int    thread_id;
+    struct quiz     *q;
+};
 
-	LONG time_ms;
+struct quiz_cmd {
+    unsigned int    cmd_id;
+    unsigned int    user_id;
+    char            *cmd;
+    char            *param;
+    char            *channel;
 };
 
 struct quiz {
-	vector<struct quiz_question> questions;
+    struct mutex                                q_lock;
 
-	int question_nr;
+    vector<struct quiz_cmd>                     cmd_queue;
 
-	int quiz_state;
-	struct mutex state_lock;
+    struct irc_client                           irc_c;
+
+    long                                        time_ms;
+    unsigned int                                state;
+    struct quiz_cmd                             cmd_current;
+
+    unsigned int                                participants;
+    unsigned int                                distribution[4];
+    vector<struct quiz_participant_data>        participants_data;
+    map<string, unsigned int>           	participants_data_link;
 };
 
-void quiz_render(struct quiz* q);
+void quiz_static_init();
 
-void quiz_state_next(struct quiz* q);
-void quiz_state_previous(struct quiz* q);
+void quiz_distribution_data_send();
 
-void quiz_message_parse(struct quiz* q, struct irc_message *message);
-
-void quiz_init(struct quiz *q, const char *filename);
-
-void quiz_question_window_init();
-void quiz_question_window_render(struct quiz* q, unsigned int question_nr);
-void quiz_question_window_destroy();
-
-void quiz_question_distribution_init();
-void quiz_question_distribution_render(unsigned int question_nr);
-void quiz_question_distribution_destroy();
-
-void quiz_question_result_init();
-void quiz_question_result_render(unsigned int question_nr);
-void quiz_question_result_destroy();
-
-void quiz_result_init();
-void quiz_result_render();
-void quiz_result_destroy();
+void quiz_cmd_enqueue(unsigned int cmd_id, unsigned int user_id, const char *cmd, const char *param, const char *channel);

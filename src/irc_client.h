@@ -32,6 +32,11 @@ struct irc_message {
     char msg[MAXMSGSIZE];
 };
 
+struct irc_client_receive_loop_params {
+    unsigned int thread_id;
+    struct irc_client *irc_c;
+};
+
 struct irc_client {
 	char *nickname;
 	char *token;

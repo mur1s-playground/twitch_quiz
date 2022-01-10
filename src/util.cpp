@@ -7,6 +7,8 @@
 #ifdef _WIN32
 #else
 #include <unistd.h>
+#include <time.h>
+#include <math.h>
 #endif
 #include <fstream>
 
@@ -301,4 +303,29 @@ void util_download_file_to(const char *url, const char *destination) {
     util_system_command(command_str.str().c_str(), &output);
     free(output);
 #endif
+}
+
+long util_get_time_ms() {
+    long            ms;
+    time_t          s;
+    struct timespec spec;
+
+    clock_gettime(CLOCK_REALTIME, &spec);
+
+    s  = spec.tv_sec;
+    ms = round(spec.tv_nsec / 1.0e6);
+    if (ms > 999) {
+        s++;
+        ms = 0;
+    }
+
+    return ((long)s)*1000L + ms;
+}
+
+void util_file_write(const char *filepath, const char *data) {
+    FILE *fp = fopen(filepath, "ab");
+    if (fp != NULL) {
+        fputs(data, fp);
+        fclose(fp);
+    }
 }

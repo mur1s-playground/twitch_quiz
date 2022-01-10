@@ -3,124 +3,72 @@
 #include "main.h"
 #include "util.h"
 #include "logger.h"
+#include "thread.h"
+#include "crypto.h"
 
-#include <SDL.h>
-#include <SDL_ttf.h>
-
+#include <cstring>
 #include <sstream>
 #include <map>
 
 #include "mutex.h"
 
+struct ThreadPool               quizzes_pool;
+map<unsigned int, struct quiz *> quizzes = map<unsigned int, struct quiz *>();
 
-SDL_Window *window_quiz_question;
-SDL_Renderer *renderer_quiz_question;
-SDL_Surface *quiz_question_overlay;
-SDL_Texture *quiz_question_texture;
-map<string, struct quiz_cfg>	quiz_question_overlay_cfg;
+struct mutex    quiz_dd_lock;
+vector<struct quiz_distribution_data> quiz_dd = vector<struct quiz_distribution_data>();
 
-SDL_Window* window_quiz_question_distribution;
-SDL_Renderer *renderer_quiz_question_distribution;
-SDL_Surface* quiz_question_distribution_overlay;
-SDL_Texture* quiz_question_distribution_texture;
-map<string, struct quiz_cfg>	quiz_question_distribution_overlay_cfg;
-
-SDL_Window* window_quiz_question_result;
-SDL_Renderer* renderer_quiz_question_result;
-SDL_Surface* quiz_question_result_overlay;
-SDL_Texture* quiz_question_result_texture;
-map<string, struct quiz_cfg>	quiz_question_result_overlay_cfg;
-
-SDL_Window* window_quiz_result;
-SDL_Renderer* renderer_quiz_result;
-SDL_Surface* quiz_result_overlay;
-SDL_Texture* quiz_result_texture;
-map<string, struct quiz_cfg>	quiz_result_overlay_cfg;
-
-map<string, struct quiz_participant_data *>	quiz_participants;
-mutex quiz_participants_lock;
-
-map<unsigned int, vector<struct question_result>*>	question_results;
-
-vector<struct question_result>* quiz_result = nullptr;
-
-unsigned int participants = 0;
-unsigned int a_count[4] = { 0, 0, 0, 0 };
-
-void quiz_question_result_calculate(struct quiz* q, unsigned int question_nr);
-void quiz_result_calculate();
-
-void quiz_render(struct quiz* q) {
-	mutex_wait_for(&q->state_lock);
-	if (q->quiz_state == 0) {
-		quiz_question_distribution_render(q->question_nr);
-	}
-	mutex_release(&q->state_lock);
+void quiz_static_init() {
+    thread_pool_init(&quizzes_pool, 10);
+    mutex_init(&quiz_dd_lock);
 }
 
-void quiz_state_next(struct quiz* q) {
-	mutex_wait_for(&q->state_lock);
-	if (q->quiz_state == -1) {
-		q->quiz_state = 0;
-		q->question_nr = 0;
-		quiz_question_window_render(q, q->question_nr);
+void quiz_distribution_data_enqueue(unsigned int user_id, unsigned int param, unsigned int participants, unsigned int count[4]) {
+    struct quiz_distribution_data qdd;
+    qdd.user_id = user_id;
+    qdd.param = param;
+    qdd.participants = participants;
+    memcpy(qdd.count, count, 4 * sizeof(unsigned int));
 
-		SYSTEMTIME time;
-		GetSystemTime(&time);
-		q->questions[q->question_nr].time_ms = time.wDay * 24 * 60 * 60 * 1000 + time.wHour * 60 * 60 * 1000 + time.wMinute * 60 * 1000 + time.wSecond * 1000 + time.wMilliseconds;
-
-		memset(&a_count, 0, 4 * sizeof(unsigned int));
-		quiz_question_distribution_init();
-	} else if (q->quiz_state == 0) {
-		q->quiz_state = 1;
-		quiz_question_window_destroy();
-		quiz_question_distribution_destroy();
-		quiz_question_result_calculate(q, q->question_nr);
-		quiz_question_result_init();
-		quiz_question_result_render(q->question_nr);
-	} else if (q->quiz_state == 1) {
-		if (q->question_nr + 1 < q->questions.size()) {
-			q->question_nr++;
-			q->quiz_state = 0;
-			quiz_question_result_destroy();
-			quiz_question_window_init();
-			quiz_question_window_render(q, q->question_nr);
-
-			SYSTEMTIME time;
-			GetSystemTime(&time);
-			q->questions[q->question_nr].time_ms = time.wDay * 24 * 60 * 60 * 1000 + time.wHour * 60 * 60 * 1000 + time.wMinute * 60 * 1000 + time.wSecond * 1000 + time.wMilliseconds;
-
-			memset(&a_count, 0, 4 * sizeof(unsigned int));
-			quiz_question_distribution_init();
-		} else {
-			q->quiz_state = 2;
-			quiz_question_result_destroy();
-			quiz_result_calculate();
-			quiz_result_init();
-			quiz_result_render();
-		}
-	} else if (q->quiz_state == 2) {
-		exit(0);
-	}
-	mutex_release(&q->state_lock);
+    mutex_wait_for(&quiz_dd_lock);
+    quiz_dd.push_back(qdd);
+    mutex_release(&quiz_dd_lock);
 }
 
-void quiz_state_previous(struct quiz* q) {
-	if (q->quiz_state == -1) {
+void quiz_distribution_data_send() {
+    unsigned int ct = 0;
 
-	}
+    mutex_wait_for(&quiz_dd_lock);
+
+    ct = quiz_dd.size();
+
+    stringstream msg;
+    msg << "{";
+    for (int c = 0; c < quiz_dd.size(); c++) {
+        msg << "\"" << c << "\":{\"user_id\":" << quiz_dd[c].user_id << ",\"param\":" << quiz_dd[c].param << ",\"participants\":" << quiz_dd[c].participants << ",";
+        for (int a = 0; a < 4; a++) {
+            msg << "\"answer_" << a << "\":" << quiz_dd[c].count[a];
+            if (a + 1 < 4) msg << ",";
+        }
+        msg << "}";
+        if (c + 1 < quiz_dd.size()) msg << ",";
+    }
+    msg << "}\n";
+
+    quiz_dd.clear();
+    mutex_release(&quiz_dd_lock);
+
+    if (ct > 0) {
+        api_interface_distribution_update(&api_i, msg.str().c_str());
+    }
 }
 
 void quiz_message_parse(struct quiz* q, struct irc_message* message) {
 	struct quiz_participant_data* qp_d = nullptr;
 
-	mutex_wait_for(&q->state_lock);
-	unsigned int question_nr = 0;
-	if (q->quiz_state != 0) {
+	if (q->state != 0) {
 		return;
 	}
-	question_nr = q->question_nr;
-	mutex_release(&q->state_lock);
 
 	string name(message->name);
 	string msg(message->msg);
@@ -137,680 +85,247 @@ void quiz_message_parse(struct quiz* q, struct irc_message* message) {
 		}
 
 		if (answer_id > -1) {
-			mutex_wait_for(&quiz_participants_lock);
-			map<string, struct quiz_participant_data*>::iterator qp_it = quiz_participants.find(name);
-			if (qp_it == quiz_participants.end()) {
-				participants++;
-				qp_d = new struct quiz_participant_data;
-				mutex_init(&qp_d->lock);
-				qp_d->correct_answers = 0;
-				qp_d->time_s = 0;
-				quiz_participants.insert(pair<string, struct quiz_participant_data*>(name, qp_d));
+                        struct quiz_participant_data qp_d;
+                        qp_d.answer_id = answer_id;
+                        qp_d.time_ms = util_get_time_ms();
+                        qp_d.active = true;
+
+			map<string, unsigned int>::iterator qp_it = q->participants_data_link.find(name);
+			if (qp_it == q->participants_data_link.end()) {
+                                q->participants++;
+                                q->distribution[answer_id]++;
+                                pair<map<string, unsigned int>::iterator, bool> ins_res = q->participants_data_link.insert(pair<string, unsigned int>(name, q->participants_data.size()));
+                                qp_d.name_link = ins_res.first;
+                                q->participants_data.push_back(qp_d);
 			} else {
-				qp_d = qp_it->second;
-			}
-
-			struct quiz_answer qa;
-			qa.answer_id = answer_id;
-
-			SYSTEMTIME time;
-			GetSystemTime(&time);
-			qa.time_ms = time.wDay * 24 * 60 * 60 * 1000 + time.wHour * 60 * 60 * 1000 + time.wMinute * 60 * 1000 + time.wSecond * 1000 + time.wMilliseconds;
-
-			mutex_wait_for(&qp_d->lock);
-			map<unsigned int, struct quiz_answer>::iterator answer_it = qp_d->answers.find(question_nr);
-			if (answer_it == qp_d->answers.end()) {
-				qp_d->answers.insert(pair<unsigned int, struct quiz_answer>(question_nr, qa));
-			} else {
-				a_count[answer_it->second.answer_id]--;
-				answer_it->second.answer_id = answer_id;
-				answer_it->second.time_ms = qa.time_ms;
-			}
-			a_count[answer_id]++;
-
-			mutex_release(&qp_d->lock);
-
-			mutex_release(&quiz_participants_lock);
-		}
-	}
-}
-
-void quiz_init(struct quiz* q, const char* filename) {
-	mutex_init(&quiz_participants_lock);
-	mutex_init(&q->state_lock);
-
-	vector<string> quiz_file = util_file_read(filename);
-	for (int l = 0; l < quiz_file.size(); l++) {
-		if (quiz_file[l].length() > 0) {
-			vector<string> line_splt = util_split(quiz_file[l], ";");
-			if (line_splt.size() == 6) {
-				struct quiz_question q_;
-				util_chararray_from_const(line_splt[0].c_str(), &q_.question);
-				logger_write(&main_logger, LOG_LEVEL_VERBOSE, "QUIZ question", q_.question);
-				util_chararray_from_const(line_splt[1].c_str(), &q_.answer_a);
-				logger_write(&main_logger, LOG_LEVEL_VERBOSE, "QUIZ answer a", q_.answer_a);
-				util_chararray_from_const(line_splt[2].c_str(), &q_.answer_b);
-				logger_write(&main_logger, LOG_LEVEL_VERBOSE, "QUIZ answer b", q_.answer_b);
-				util_chararray_from_const(line_splt[3].c_str(), &q_.answer_c);
-				logger_write(&main_logger, LOG_LEVEL_VERBOSE, "QUIZ answer c", q_.answer_c);
-				util_chararray_from_const(line_splt[4].c_str(), &q_.answer_d);
-				logger_write(&main_logger, LOG_LEVEL_VERBOSE, "QUIZ answer d", q_.answer_d);
-
-				const char* answer = line_splt[5].c_str();
-				if (strstr(answer, "A") != nullptr) {
-					q_.correct_id = 0;
-				} else if (strstr(answer, "B") != nullptr) {
-					q_.correct_id = 1;
-				} else if (strstr(answer, "C") != nullptr) {
-					q_.correct_id = 2;
-				} else if (strstr(answer, "D") != nullptr) {
-					q_.correct_id = 3;
-				}
-
-				q->questions.push_back(q_);
-			} else {
-				printf("Error parsing quiz.csv on line %i, found %i columns, 6 needed\n", l, (int)line_splt.size());
-				exit(1);
+				unsigned int idx = qp_it->second;
+                                q->distribution[q->participants_data[idx].answer_id]--;
+                                q->distribution[answer_id]++;
+                                q->participants_data[idx].active = false;
+                                qp_d.name_link = qp_it;
+                                q->participants_data.push_back(qp_d);
+                                qp_it->second = q->participants_data.size() - 1;
 			}
 		}
 	}
-
-	q->question_nr = -1;
-	q->quiz_state = -1;
 }
 
-void quiz_question_window_init() {
-	vector<string> qq_cfg = util_file_read("./custom/quiz_question_overlay.cfg");
-	for (int l = 0; l < qq_cfg.size(); l++) {
-		if (qq_cfg[l].length() > 0) {
-			vector<string> qq_cfg_splt = util_split(qq_cfg[l], ";");
-			if (qq_cfg_splt.size() == 5) {
-				string identifier(qq_cfg_splt[0].c_str());
-				struct quiz_cfg qc;
-				qc.pos_x = stoi(qq_cfg_splt[1].c_str());
-				qc.pos_y = stoi(qq_cfg_splt[2].c_str());
-				qc.width = stoi(qq_cfg_splt[3].c_str());
-				qc.height = stoi(qq_cfg_splt[4].c_str());
-				quiz_question_overlay_cfg.insert(pair<string, struct quiz_cfg>(identifier, qc));
-			} else {
-				printf("Error parsing quiz_question_overlay.cfg on line %i, found %i columns, 5 needed\n", l, (int)qq_cfg_splt.size());
-				exit(1);
-			}
-		}
-	}
+void quiz_process(void *args) {
+    struct quiz_process_args *qpa = (struct quiz_process_args *) args;
+    struct quiz *q = qpa->q;
 
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_question_overlay_cfg.find(string("size"));
-	unsigned int width = 1920;
-	unsigned int height = 540;
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		width = qc.pos_x;
-		height = qc.pos_y;
-	}
+    bool running = true;
 
-	window_quiz_question = SDL_CreateWindow("Twitch Quiz - Question & Answers", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, 0);
-	renderer_quiz_question = SDL_CreateRenderer(window_quiz_question, -1, 0);
-	quiz_question_overlay = SDL_LoadBMP("./custom/quiz_question_overlay.bmp");
+    unsigned int sleep_ms_ct = 0;
+    unsigned int sleep_ms = 4;
+
+    unsigned int distribution_poll_ct = 0;
+
+    while (running) {
+        mutex_wait_for(&q->q_lock);
+        if (q->cmd_queue.size() > 0) {
+            if (strstr(q->cmd_queue[0].cmd, "ask") != nullptr) {
+                if (q->state == -1 || q->state == 1) {
+                    q->state = 0;
+                    memcpy(&q->cmd_current, &q->cmd_queue[0], sizeof(struct quiz_cmd));
+                    q->participants = 0;
+                    memset(&q->distribution, 0, 4 * sizeof(unsigned int));
+                    q->time_ms = util_get_time_ms();
+
+                    q->participants_data.clear();
+                    q->participants_data.reserve(5000);
+                    q->participants_data_link.clear();
+
+                    vector<string> prm_splt = util_split(q->cmd_current.param, ";");
+
+                    stringstream file_path;
+                    file_path << "./data/" << q->cmd_current.user_id << "_" << prm_splt[0] << ".csv";
+
+                    util_file_delete(file_path.str().c_str());
+                } else {
+                    logger_write(&main_logger, LOG_LEVEL_ERROR, "QUIZ_PROC", "ASK wrong state");
+                }
+            } else if (strstr(q->cmd_queue[0].cmd, "end") != nullptr) {
+                if (q->state == 0) {
+                    q->state = 1;
+                    memcpy(&q->cmd_current, &q->cmd_queue[0], sizeof(struct quiz_cmd));
+
+                    vector<string> prm_splt = util_split(q->cmd_current.param, "_");
+                    unsigned int correct_id = stoi(prm_splt[1].c_str());
+
+                    stringstream top10;
+                    top10 << "{\"user_id\":" << q->cmd_current.user_id << ",\"param\":" << prm_splt[0] << ",\"csv\":\"";
+
+                    unsigned int p_count = 0;
+                    stringstream result_data;
+                    for (int p = 0; p < q->participants_data.size(); p++) {
+                        if (q->participants_data[p].active && q->participants_data[p].answer_id == correct_id) {
+                            result_data << p << ";" << q->participants_data[p].name_link->first.c_str() << ";" << q->participants_data[p].answer_id << ";" << (q->participants_data[p].time_ms - q->time_ms) / 1000.0f << "\n";
+                            if (p_count < 10) {
+                                top10 << p << ";" << q->participants_data[p].name_link->first.c_str() << ";" << q->participants_data[p].answer_id << ";" << (q->participants_data[p].time_ms - q->time_ms) / 1000.0f << "#";
+                            }
+                            p_count++;
+                        }
+                    }
+
+                    top10 << "\"}";
+
+                    api_interface_question_result_update(&api_i, top10.str().c_str());
+
+                    stringstream file_path;
+                    file_path << "./data/" << q->cmd_current.user_id << "_" << prm_splt[0] << ".csv";
+
+                    util_file_write(file_path.str().c_str(), result_data.str().c_str());
+                } else {
+                    logger_write(&main_logger, LOG_LEVEL_ERROR, "QUIZ_PROC", "END wrong state");
+                }
+            } else if (strstr(q->cmd_queue[0].cmd, "clear") != nullptr) {
+                if (q->state == -1 || q->state == 1) {
+                    memcpy(&q->cmd_current, &q->cmd_queue[0], sizeof(struct quiz_cmd));
+                    for (int qe = 0; qe < 30; qe++) {
+                        stringstream file_path;
+                        file_path << "./data/" << q->cmd_current.user_id << "_" << qe << ".csv";
+
+                        util_file_delete(file_path.str().c_str());
+                    }
+                }
+            } else if (strstr(q->cmd_queue[0].cmd, "total") != nullptr) {
+                if (q->state == 1) {
+                    memcpy(&q->cmd_current, &q->cmd_queue[0], sizeof(struct quiz_cmd));
+
+                    map<string, struct quiz_participant_result_data> q_result = map<string, struct quiz_participant_result_data>();
+
+                    for (int qe = 0; qe < 30; qe++) {
+                        stringstream file_path;
+                        file_path << "./data/" << q->cmd_current.user_id << "_" << qe << ".csv";
+
+                        vector<string> file = util_file_read(file_path.str().c_str());
+
+                        for (int l = 0; l < file.size(); l++) {
+                            string line = file[l];
+                            if (strlen(line.c_str()) > 0) {
+                                vector<string> splt = util_split(line, ";");
+                                if (splt.size() == 4) {
+                                    map<string, struct quiz_participant_result_data>::iterator qpr = q_result.find(splt[1]);
+                                    if (qpr == q_result.end()) {
+                                        struct quiz_participant_result_data qprd;
+                                        util_chararray_from_const(splt[1].c_str(), &qprd.name);
+                                        qprd.correct_answers = 1;
+                                        qprd.total_time = stof(splt[3].c_str());
+                                        q_result.insert(pair<string, quiz_participant_result_data>(splt[1], qprd));
+                                        logger_write(&main_logger, LOG_LEVEL_DEBUG, "QUIZ_PROC", "TOTAL inserting");
+                                    } else {
+                                        struct quiz_participant_result_data *qprd = &qpr->second;
+                                        qprd->correct_answers++;
+                                        qprd->total_time += stof(splt[3].c_str());
+                                        logger_write(&main_logger, LOG_LEVEL_DEBUG, "QUIZ_PROC", "TOTAL updating");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    vector<struct quiz_participant_result_data *> ordered_result = vector<struct quiz_participant_result_data *>();
+
+                    map<string, struct quiz_participant_result_data>::iterator it_f = q_result.begin();
+                    while (it_f != q_result.end()) {
+                        struct quiz_participant_result_data *qprd = &it_f->second;
+                        if (ordered_result.size() == 0) {
+                            ordered_result.push_back(qprd);
+                        } else {
+                            bool inserted = false;
+                            for (int ord = 0; ord < ordered_result.size(); ord++) {
+                                if (ordered_result[ord]->correct_answers < qprd->correct_answers || (ordered_result[ord]->correct_answers <= qprd->correct_answers && ordered_result[ord]->total_time < qprd->total_time)) {
+                                    ordered_result.insert(ordered_result.begin() + ord, qprd);
+                                    inserted = true;
+                                    break;
+                                }
+                            }
+                            if (!inserted) ordered_result.push_back(qprd);
+                        }
+                        it_f++;
+                    }
+
+                    stringstream top10;
+                    top10 << "{\"user_id\":" << q->cmd_current.user_id << ",\"csv\":\"";
+                    for (int p = 0; p < 10 && p < ordered_result.size(); p++) {
+                        top10 << p << ";" << ordered_result[p]->name << ";" << ordered_result[p]->correct_answers << ";" << ordered_result[p]->total_time << "#";
+                    }
+                    top10 << "\"}";
+
+                    api_interface_result_update(&api_i, top10.str().c_str());
+                }
+            }
+            q->cmd_queue.erase(q->cmd_queue.begin());
+        }
+
+        struct irc_message message_current;
+        if (irc_client_message_next(&q->irc_c, &message_current)) {
+            quiz_message_parse(q, &message_current);
+        }
+
+        if (distribution_poll_ct >= 2000) {
+            distribution_poll_ct -= 2000;
+
+            if (q->state == 0) {
+                quiz_distribution_data_enqueue(q->cmd_current.user_id, stoi(q->cmd_current.param), q->participants, q->distribution);
+            }
+        }
+
+        mutex_release(&q->q_lock);
+        util_sleep(sleep_ms);
+        distribution_poll_ct += sleep_ms;
+    }
+
+    thread_terminated(&quizzes_pool, qpa->thread_id);
+    free(qpa);
 }
 
-void quiz_question_window_destroy() {
-	SDL_DestroyWindow(window_quiz_question);
-}
-
-void quiz_question_window_draw_text(int w_target, int h_target, const char *text, int pos_x, int pos_y, SDL_Color color, SDL_Renderer *renderer) {
-	TTF_Font* Sans = nullptr;
-
-	int w_t = 0, h_t = 0;
-	int font_size = 2;
-	do {
-		if (Sans != nullptr) TTF_CloseFont(Sans);
-		font_size++;
-		Sans = TTF_OpenFont("./custom/font.ttf", font_size);
-		if (!Sans) {
-			logger_write(&main_logger, LOG_LEVEL_ERROR, "QUIZ font", "unable to open font font.ttf");
-			logger_write(&main_logger, LOG_LEVEL_ERROR, "QUIZ font", TTF_GetError());
-			exit(1);
-		}
-		TTF_SizeText(Sans, text, &w_t, &h_t);
-
-		stringstream font_dims;
-		font_dims << "w x h: " << w_t << " x " << h_t << ", size: " << font_size;
-
-		//logger_write(&main_logger, LOG_LEVEL_VERBOSE, "QUIZ font dimensions", font_dims.str().c_str());
-	} while (w_t < w_target && h_t < h_target);
-
-	font_size--;
-	TTF_CloseFont(Sans);
-	Sans = TTF_OpenFont("./custom/font.ttf", font_size);
-
-	SDL_Surface* surfaceMessage = TTF_RenderText_Solid(Sans, text, color);
-	SDL_Texture* Message = SDL_CreateTextureFromSurface(renderer, surfaceMessage);
-
-	SDL_Rect Message_rect;
-	Message_rect.x = pos_x + ((w_target - w_t) / 2);
-	Message_rect.y = pos_y + ((h_target - h_t) / 2);
-	Message_rect.w = w_t;
-	Message_rect.h = h_t;
-
-	SDL_RenderCopy(renderer, Message, NULL, &Message_rect);
-	SDL_RenderPresent(renderer);
-
-	SDL_FreeSurface(surfaceMessage);
-	SDL_DestroyTexture(Message);
-}
-
-void quiz_question_window_render(struct quiz *q, unsigned int question_nr) {
-	if (question_nr < 0 || question_nr >= q->questions.size()) return;
-
-	quiz_question_texture = SDL_CreateTextureFromSurface(renderer_quiz_question, quiz_question_overlay);
-	SDL_RenderCopy(renderer_quiz_question, quiz_question_texture, NULL, NULL);
-
-	SDL_Color font_color = { 255, 255, 255 };
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_question_overlay_cfg.find(string("color"));
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		font_color.r = qc.pos_x;
-		font_color.g = qc.pos_y;
-		font_color.b = qc.width;
-		font_color.a = qc.height;
-	}
-
-	q_cfg_it = quiz_question_overlay_cfg.find(string("question"));
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		quiz_question_window_draw_text(qc.width, qc.height, q->questions[question_nr].question, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question);
-	}
-
-	q_cfg_it = quiz_question_overlay_cfg.find(string("answer_a"));
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		quiz_question_window_draw_text(qc.width, qc.height, q->questions[question_nr].answer_a, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question);
-	}
-
-	q_cfg_it = quiz_question_overlay_cfg.find(string("answer_b"));
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		quiz_question_window_draw_text(qc.width, qc.height, q->questions[question_nr].answer_b, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question);
-	}
-
-	q_cfg_it = quiz_question_overlay_cfg.find(string("answer_c"));
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		quiz_question_window_draw_text(qc.width, qc.height, q->questions[question_nr].answer_c, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question);
-	}
-
-	q_cfg_it = quiz_question_overlay_cfg.find(string("answer_d"));
-	if (q_cfg_it != quiz_question_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		quiz_question_window_draw_text(qc.width, qc.height, q->questions[question_nr].answer_d, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question);
-	}
-
-	SDL_DestroyTexture(quiz_question_texture);
-}
-
-void quiz_question_distribution_init() {
-	vector<string> qq_cfg = util_file_read("./custom/quiz_question_distribution_overlay.cfg");
-	for (int l = 0; l < qq_cfg.size(); l++) {
-		if (qq_cfg[l].length() > 0) {
-			vector<string> qq_cfg_splt = util_split(qq_cfg[l], ";");
-			if (qq_cfg_splt.size() == 5) {
-				string identifier(qq_cfg_splt[0].c_str());
-				struct quiz_cfg qc;
-				qc.pos_x = stoi(qq_cfg_splt[1].c_str());
-				qc.pos_y = stoi(qq_cfg_splt[2].c_str());
-				qc.width = stoi(qq_cfg_splt[3].c_str());
-				qc.height = stoi(qq_cfg_splt[4].c_str());
-				quiz_question_distribution_overlay_cfg.insert(pair<string, struct quiz_cfg>(identifier, qc));
-			} else {
-				printf("Error parsing quiz_question_distribution_overlay.cfg on line %i, found %i columns, 5 needed\n", l, (int)qq_cfg_splt.size());
-				exit(1);
-			}
-		}
-	}
-
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("size"));
-	unsigned int width = 640;
-	unsigned int height = 540;
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		width = qc.pos_x;
-		height = qc.pos_y;
-	}
-
-	window_quiz_question_distribution = SDL_CreateWindow("Twitch Quiz - Distribution", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, 0);
-	renderer_quiz_question_distribution = SDL_CreateRenderer(window_quiz_question_distribution, -1, 0);
-	quiz_question_distribution_overlay = SDL_LoadBMP("./custom/quiz_question_distribution_overlay.bmp");
-}
-
-void quiz_question_distribution_destroy() {
-	SDL_DestroyWindow(window_quiz_question_distribution);
-}
-
-unsigned int quiz_participants_count_get() {
-	return 100;
-}
-
-float quiz_question_distribution_get(unsigned int question_nr, unsigned int answer_id) {
-	float dist = 0;
-	mutex_wait_for(&quiz_participants_lock);
-	if (participants > 0) {
-		dist = a_count[answer_id] / (float)participants;
-	}
-	mutex_release(&quiz_participants_lock);
-	return dist;
-}
-
-void quiz_question_result_calculate(struct quiz *q, unsigned int question_nr) {
-	unsigned int correct_id = q->questions[question_nr].correct_id;
-	long		q_time = q->questions[question_nr].time_ms;
-
-	vector<struct question_result>* q_result = new vector<struct question_result>();
-
-	mutex_wait_for(&quiz_participants_lock);
-	map<string, struct quiz_participant_data *>::iterator qpd = quiz_participants.begin();
-	while (qpd != quiz_participants.end()) {
-		struct quiz_participant_data* d = qpd->second;
-		map<unsigned int, struct quiz_answer>::iterator ans_it = d->answers.find(question_nr);
-		if (ans_it != d->answers.end()) {
-			if (ans_it->second.answer_id == correct_id) {
-				struct question_result qr;
-				string name = string(qpd->first.c_str());
-				vector<string> n_splt = util_split(name, "!");
-				string ns = string(n_splt[0].c_str());
-				ns = util_trim(ns, " :");
-
-				qr.name = string(ns);
-				qr.time_s = (ans_it->second.time_ms - q_time) / 1000.0f;
-
-				d->correct_answers++;
-				d->time_s += qr.time_s;
-
-				bool inserted = false;
-				for (int q = 0; q < q_result->size(); q++) {
-					if ((*q_result)[q].time_s > qr.time_s) {
-						q_result->insert(q_result->begin() + q, qr);
-						inserted = true;
-						break;
-					}
-				}
-				if (!inserted) q_result->push_back(qr);
-			}
-		}
-		qpd++;
-	}
-
-	question_results.insert(pair<unsigned int, vector<struct question_result> *>(question_nr, q_result));
-	mutex_release(&quiz_participants_lock);
-}
-
-float quiz_question_result_get(unsigned int question_nr, unsigned int position_id, char **name) {
-	bool have_result = false;
-
-	map<unsigned int, vector<struct question_result>*>::iterator result = question_results.find(question_nr);
-	if (result != question_results.end()) {
-		vector<struct question_result>* q_result = result->second;
-		if (position_id < q_result->size()) {
-			util_chararray_from_const((*q_result)[position_id].name.c_str(), name);
-			return (*q_result)[position_id].time_s;
-		}
-	}
-
-	util_chararray_from_const("", name);
-	return -1.0f;
-}
-
-void quiz_result_calculate() {
-	quiz_result = new vector<struct question_result>();
-
-	map<string, struct quiz_participant_data*>::iterator qpd_it = quiz_participants.begin();
-	while (qpd_it != quiz_participants.end()) {
-
-		struct question_result qr;
-
-		string name = string(qpd_it->first.c_str());
-		vector<string> n_splt = util_split(name, "!");
-		string ns = string(n_splt[0].c_str());
-		ns = util_trim(ns, " :");
-
-		qr.name = string(ns);
-		qr.count = qpd_it->second->correct_answers;
-		qr.time_s = qpd_it->second->time_s;
-
-		bool inserted = false;
-		for (int q = 0; q < quiz_result->size(); q++) {
-			if ((*quiz_result)[q].count < qr.count || ((*quiz_result)[q].count == qr.count && (*quiz_result)[q].time_s > qr.time_s)) {
-				quiz_result->insert(quiz_result->begin() + q, qr);
-				inserted = true;
-				break;
-			}
-		}
-		if (!inserted) quiz_result->push_back(qr);
-		qpd_it++;
-	}
-}
-
-float quiz_result_get(unsigned int position_id, char **name, unsigned int *correct) {
-	if (position_id < quiz_result->size()) {
-		util_chararray_from_const((*quiz_result)[position_id].name.c_str(), name);
-		*correct = (*quiz_result)[position_id].count;
-		return (*quiz_result)[position_id].time_s;
-	}
-	util_chararray_from_const("", name);
-	*correct = 0;
-	return -1.0f;
-}
-
-void quiz_question_distribution_render(unsigned int question_nr) {
-	quiz_question_distribution_texture = SDL_CreateTextureFromSurface(renderer_quiz_question_distribution, quiz_question_distribution_overlay);
-	SDL_RenderCopy(renderer_quiz_question_distribution, quiz_question_distribution_texture, NULL, NULL);
-
-	float a_percent = quiz_question_distribution_get(question_nr, 0);
-	float b_percent = quiz_question_distribution_get(question_nr, 1);
-	float c_percent = quiz_question_distribution_get(question_nr, 2);
-	float d_percent = quiz_question_distribution_get(question_nr, 3);
-
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("line_color"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		SDL_SetRenderDrawColor(renderer_quiz_question_distribution, qc.pos_x, qc.pos_y, qc.width, qc.height);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("a_line"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		SDL_Rect r;
-		r.x = qc.pos_x;
-		r.y = qc.pos_y;
-		r.w = (int) (a_percent * qc.width);
-		r.h = qc.height;
-		SDL_RenderFillRect(renderer_quiz_question_distribution, &r);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("b_line"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		SDL_Rect r;
-		r.x = qc.pos_x;
-		r.y = qc.pos_y;
-		r.w = (int)(b_percent * qc.width);
-		r.h = qc.height;
-		SDL_RenderFillRect(renderer_quiz_question_distribution, &r);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("c_line"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		SDL_Rect r;
-		r.x = qc.pos_x;
-		r.y = qc.pos_y;
-		r.w = (int)(c_percent * qc.width);
-		r.h = qc.height;
-		SDL_RenderFillRect(renderer_quiz_question_distribution, &r);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("d_line"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		SDL_Rect r;
-		r.x = qc.pos_x;
-		r.y = qc.pos_y;
-		r.w = (int)(d_percent * qc.width);
-		r.h = qc.height;
-		SDL_RenderFillRect(renderer_quiz_question_distribution, &r);
-	}
-
-	SDL_Color font_color = { 255, 255, 255 };
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("text_color"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		font_color.r = qc.pos_x;
-		font_color.g = qc.pos_y;
-		font_color.b = qc.width;
-		font_color.a = qc.height;
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("a_percent"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-
-		char value_buffer[10];
-		snprintf((char *) &value_buffer, 9, "%3.2f %%", a_percent * 100.0);
-		quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question_distribution);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("b_percent"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-
-		char value_buffer[10];
-		snprintf((char*)&value_buffer, 9, "%3.2f %%", b_percent * 100.0);
-		quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question_distribution);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("c_percent"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-
-		char value_buffer[10];
-		snprintf((char*)&value_buffer, 9, "%3.2f %%", c_percent * 100.0);
-		quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question_distribution);
-	}
-
-	q_cfg_it = quiz_question_distribution_overlay_cfg.find(string("d_percent"));
-	if (q_cfg_it != quiz_question_distribution_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-
-		char value_buffer[10];
-		snprintf((char*)&value_buffer, 9, "%3.2f %%", d_percent * 100.0);
-		quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question_distribution);
-	}
-
-	SDL_RenderPresent(renderer_quiz_question_distribution);
-	SDL_DestroyTexture(quiz_question_distribution_texture);
-}
-
-void quiz_question_result_init() {
-	vector<string> qq_cfg = util_file_read("./custom/quiz_question_result_overlay.cfg");
-	for (int l = 0; l < qq_cfg.size(); l++) {
-		if (qq_cfg[l].length() > 0) {
-			vector<string> qq_cfg_splt = util_split(qq_cfg[l], ";");
-			if (qq_cfg_splt.size() == 5) {
-				string identifier(qq_cfg_splt[0].c_str());
-				struct quiz_cfg qc;
-				qc.pos_x = stoi(qq_cfg_splt[1].c_str());
-				qc.pos_y = stoi(qq_cfg_splt[2].c_str());
-				qc.width = stoi(qq_cfg_splt[3].c_str());
-				qc.height = stoi(qq_cfg_splt[4].c_str());
-				quiz_question_result_overlay_cfg.insert(pair<string, struct quiz_cfg>(identifier, qc));
-			}
-			else {
-				printf("Error parsing quiz_question_result_overlay.cfg on line %i, found %i columns, 5 needed\n", l, (int)qq_cfg_splt.size());
-				exit(1);
-			}
-		}
-	}
-	
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_question_result_overlay_cfg.find(string("size"));
-	unsigned int width = 640;
-	unsigned int height = 540;
-	if (q_cfg_it != quiz_question_result_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		width = qc.pos_x;
-		height = qc.pos_y;
-	}
-
-	window_quiz_question_result = SDL_CreateWindow("Twitch Quiz - Question Result", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, 0);
-	renderer_quiz_question_result = SDL_CreateRenderer(window_quiz_question_result, -1, 0);
-	quiz_question_result_overlay = SDL_LoadBMP("./custom/quiz_question_result_overlay.bmp");
-}
-
-void quiz_question_result_destroy() {
-	SDL_DestroyWindow(window_quiz_question_result);
-}
-
-void quiz_question_result_render(unsigned int question_nr) {
-	quiz_question_result_texture = SDL_CreateTextureFromSurface(renderer_quiz_question_result, quiz_question_result_overlay);
-	SDL_RenderCopy(renderer_quiz_question_result, quiz_question_result_texture, NULL, NULL);
-	
-	SDL_Color font_color = { 255, 255, 255 };
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_question_result_overlay_cfg.find(string("color"));
-	if (q_cfg_it != quiz_question_result_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		font_color.r = qc.pos_x;
-		font_color.g = qc.pos_y;
-		font_color.b = qc.width;
-		font_color.a = qc.height;
-	}
-
-	unsigned int amount = 0;
-	q_cfg_it = quiz_question_result_overlay_cfg.find(string("display_amount"));
-	if (q_cfg_it != quiz_question_result_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		amount = qc.pos_x;
-	}
-
-	for (int a = 0; a < amount; a++) {
-		char* name = nullptr;
-		float time = quiz_question_result_get(question_nr, a, &name);
-
-		if (strlen(name) > 0) {
-			stringstream d;
-			d << "display_" << a;
-
-			q_cfg_it = quiz_question_result_overlay_cfg.find(d.str());
-			if (q_cfg_it != quiz_question_result_overlay_cfg.end()) {
-				struct quiz_cfg qc = q_cfg_it->second;
-				quiz_question_window_draw_text(qc.width, qc.height, name, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question_result);
-			}
-
-			stringstream d_;
-			d_ << "display_" << a << "_time";
-
-			q_cfg_it = quiz_question_result_overlay_cfg.find(d_.str());
-			if (q_cfg_it != quiz_question_result_overlay_cfg.end()) {
-				struct quiz_cfg qc = q_cfg_it->second;
-
-				char value_buffer[10];
-				snprintf((char*)&value_buffer, 9, "%3.2f s", time);
-
-				quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_question_result);
-			}
-		}
-
-		free(name);
-	}
-	
-	SDL_RenderPresent(renderer_quiz_question_result);
-	SDL_DestroyTexture(quiz_question_result_texture);
-}
-
-void quiz_result_init() {
-	vector<string> qq_cfg = util_file_read("./custom/quiz_result_overlay.cfg");
-	for (int l = 0; l < qq_cfg.size(); l++) {
-		if (qq_cfg[l].length() > 0) {
-			vector<string> qq_cfg_splt = util_split(qq_cfg[l], ";");
-			if (qq_cfg_splt.size() == 5) {
-				string identifier(qq_cfg_splt[0].c_str());
-				struct quiz_cfg qc;
-				qc.pos_x = stoi(qq_cfg_splt[1].c_str());
-				qc.pos_y = stoi(qq_cfg_splt[2].c_str());
-				qc.width = stoi(qq_cfg_splt[3].c_str());
-				qc.height = stoi(qq_cfg_splt[4].c_str());
-				quiz_result_overlay_cfg.insert(pair<string, struct quiz_cfg>(identifier, qc));
-			}
-			else {
-				printf("Error parsing quiz_result_overlay.cfg on line %i, found %i columns, 5 needed\n", l, (int)qq_cfg_splt.size());
-				exit(1);
-			}
-		}
-	}
-
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_result_overlay_cfg.find(string("size"));
-	unsigned int width = 640;
-	unsigned int height = 1080;
-	if (q_cfg_it != quiz_result_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		width = qc.pos_x;
-		height = qc.pos_y;
-	}
-
-	window_quiz_result = SDL_CreateWindow("Twitch Quiz - Result", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, 0);
-	renderer_quiz_result = SDL_CreateRenderer(window_quiz_result, -1, 0);
-	quiz_result_overlay = SDL_LoadBMP("./custom/quiz_result_overlay.bmp");
-}
-
-void quiz_result_destroy() {
-	SDL_DestroyWindow(window_quiz_result);
-}
-
-void quiz_result_render() {
-	quiz_result_texture = SDL_CreateTextureFromSurface(renderer_quiz_result, quiz_result_overlay);
-	SDL_RenderCopy(renderer_quiz_result, quiz_result_texture, NULL, NULL);
-
-	SDL_Color font_color = { 255, 255, 255 };
-	map<string, struct quiz_cfg>::iterator q_cfg_it = quiz_result_overlay_cfg.find(string("color"));
-	if (q_cfg_it != quiz_result_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		font_color.r = qc.pos_x;
-		font_color.g = qc.pos_y;
-		font_color.b = qc.width;
-		font_color.a = qc.height;
-	}
-
-	unsigned int amount = 0;
-	q_cfg_it = quiz_result_overlay_cfg.find(string("display_amount"));
-	if (q_cfg_it != quiz_result_overlay_cfg.end()) {
-		struct quiz_cfg qc = q_cfg_it->second;
-		amount = qc.pos_x;
-	}
-
-	for (int a = 0; a < amount; a++) {
-		char* name = nullptr;
-		unsigned int correct = 0;
-		float time = quiz_result_get(a, &name, &correct);
-
-		if (strlen(name) > 0) {
-			stringstream d;
-			d << "display_" << a;
-
-			q_cfg_it = quiz_result_overlay_cfg.find(d.str());
-			if (q_cfg_it != quiz_result_overlay_cfg.end()) {
-				struct quiz_cfg qc = q_cfg_it->second;
-				quiz_question_window_draw_text(qc.width, qc.height, name, qc.pos_x, qc.pos_y, font_color, renderer_quiz_result);
-			}
-
-
-			stringstream d_c;
-			d_c << "display_" << a << "_c";
-
-			q_cfg_it = quiz_result_overlay_cfg.find(d_c.str());
-			if (q_cfg_it != quiz_result_overlay_cfg.end()) {
-				struct quiz_cfg qc = q_cfg_it->second;
-
-				char value_buffer[10];
-				snprintf((char*)&value_buffer, 9, "%i", correct);
-
-				quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_result);
-			}
-
-
-			stringstream d_;
-			d_ << "display_" << a << "_time";
-
-			q_cfg_it = quiz_result_overlay_cfg.find(d_.str());
-			if (q_cfg_it != quiz_result_overlay_cfg.end()) {
-				struct quiz_cfg qc = q_cfg_it->second;
-
-				char value_buffer[10];
-				snprintf((char*)&value_buffer, 9, "%3.2f s", time);
-
-				quiz_question_window_draw_text(qc.width, qc.height, value_buffer, qc.pos_x, qc.pos_y, font_color, renderer_quiz_result);
-			}
-		}
-
-		free(name);
-	}
-
-	SDL_RenderPresent(renderer_quiz_result);
-	SDL_DestroyTexture(quiz_result_texture);
+void quiz_cmd_enqueue(unsigned int cmd_id, unsigned int user_id, const char *cmd, const char *param, const char *channel) {
+    struct quiz_cmd qc;
+    qc.cmd_id = cmd_id;
+    qc.user_id = user_id;
+    util_chararray_from_const(cmd, &qc.cmd);
+    util_chararray_from_const(param, &qc.param);
+    util_chararray_from_const(channel, &qc.channel);
+
+    map<unsigned int, struct quiz *>::iterator q_it = quizzes.find(user_id);
+    if (q_it == quizzes.end()) {
+        struct quiz *q = new struct quiz;
+
+        mutex_init(&q->q_lock);
+        q->cmd_queue.push_back(qc);
+        q->state = -1;
+
+        char numbers[10] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+
+        stringstream irc_nick;
+        irc_nick << "justinfan1337";
+
+/*
+        char *random = crypto_random(4);
+        for (int n = 0; n < 4; n++) {
+            irc_nick << (int)(numbers[random[n] % 10]);
+        }
+        free(random);
+*/
+        logger_write(&main_logger, LOG_LEVEL_DEBUG, "QUIZ IRC_NICK", irc_nick.str().c_str());
+
+        irc_client_init(&q->irc_c, irc_nick.str().c_str(), "", "irc.chat.twitch.tv", 6697, "8X8ThYzPyo7QDk1mEloDT/DXEVGQ88tte3iD1F67TLg=");
+	irc_client_channel_add(&q->irc_c, qc.channel);
+	irc_client_connection_establish(&q->irc_c);
+
+        struct quiz_process_args *qpa = new struct quiz_process_args;
+        qpa->q = q;
+
+        qpa->thread_id = thread_create(&quizzes_pool, (void*) quiz_process, qpa);
+
+        quizzes.insert(pair<unsigned int, struct quiz *>(user_id, q));
+    } else {
+        struct quiz *q = q_it->second;
+        
+        mutex_wait_for(&q->q_lock);
+        q->cmd_queue.push_back(qc);
+        mutex_release(&q->q_lock);
+    }
 }

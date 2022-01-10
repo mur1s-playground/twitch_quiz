@@ -23,7 +23,7 @@ void irc_client_init(struct irc_client *irc_c, const char *nickname, const char 
 	irc_c->port = port;
 
 	irc_c->buffer_ = (char *) malloc(TLS_MAXDATASIZE);
-	irc_c->ring_size_ = 200;
+	irc_c->ring_size_ = 2000;
 	irc_c->ring_buffer_ = (struct irc_message *) malloc(irc_c->ring_size_ * sizeof(struct irc_message));
 	irc_c->ring_position_ = 0;
 	irc_c->ring_position_r_ = 0;
@@ -182,7 +182,8 @@ void irc_client_parse(struct irc_client *irc_c, char* line, int len, bool irc_pa
 }
 
 void irc_client_receive_loop(void *param) {
-    struct irc_client *irc_c = (struct irc_client *) param;
+    struct irc_client_receive_loop_params *icrlp = (struct irc_client_receive_loop_params *) param;
+    struct irc_client *irc_c = icrlp->irc_c;
     irc_c->tls_c.running = true;
     logger_write(&main_logger, LOG_LEVEL_DEBUG, "receive thread", "start!");
     while (irc_c->tls_c.connected) {
@@ -218,7 +219,9 @@ void irc_client_receive_loop(void *param) {
         }
     }
     logger_write(&main_logger, LOG_LEVEL_DEBUG, "receive thread", "exit!");
+    thread_terminated(&irc_c->tp, icrlp->thread_id);
     irc_c->tls_c.running = false;
+    free(icrlp);
 }
 
 void irc_client_channel_add(struct irc_client *irc_c, string channel) {
@@ -229,7 +232,9 @@ void irc_client_channel_add(struct irc_client *irc_c, string channel) {
 bool irc_client_connection_establish(struct irc_client *irc_c) {
 	if (irc_client_connect(irc_c)) {
 		if (irc_client_login(irc_c)) {
-			thread_create(&irc_c->tp, (void*) &irc_client_receive_loop, (void*) irc_c);
+                        struct irc_client_receive_loop_params *icrlp = new struct irc_client_receive_loop_params;
+                        icrlp->irc_c = irc_c;
+                        icrlp->thread_id = thread_create(&irc_c->tp, (void*) &irc_client_receive_loop, (void*) icrlp);
 			if (irc_client_enable_twitch_tags(irc_c)) {
 				for (int c = 0; c < irc_c->channels->size(); c++) {
 					irc_client_join(irc_c, (*irc_c->channels)[c]);
@@ -242,6 +247,7 @@ bool irc_client_connection_establish(struct irc_client *irc_c) {
 }
 
 bool irc_client_message_next(struct irc_client *irc_c, struct irc_message *out_msg) {
+        if (!irc_c->tls_c.running) irc_client_connection_establish(irc_c);
 	bool result = false;
 	mutex_wait_for(&irc_c->ring_position_lock_);
 	if (irc_c->ring_position_r_ != irc_c->ring_position_) {

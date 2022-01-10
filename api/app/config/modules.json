@@ -1,0 +1,58 @@
+{
+    "users": {
+        "controllers": {
+            "Login": {
+                "defaultAction": "login",
+                "actions": [
+                    "login",
+                    "logout",
+                    "update",
+                    "updatepassword",
+                    "register"
+                ]
+            }
+        },
+        "defaultController": "Login"
+    },
+    "cmd": {
+       "controllers": {
+            "Poll": {
+                "defaultAction": "get",
+                "actions": [
+                    "get",
+                    "insert"
+                ]
+            },
+	    "Update": {
+		"defaultAction": "distribution",
+		"actions": [
+		    "distribution",
+		    "question",
+		    "quiz"
+		]
+	    },
+	    "State": {
+		"defaultAction": "view",
+		"actions": [
+		    "view"
+		]
+	    }
+        },
+        "defaultController": "Poll"
+    },
+    "quiz": {
+       "controllers": {
+            "Index": {
+                "defaultAction": "get",
+                "actions": [
+		    "view",
+                    "get",
+                    "insert",
+		    "delete"
+                ]
+            }
+        },
+        "defaultController": "get"
+    }
+
+}

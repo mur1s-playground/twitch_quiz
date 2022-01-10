@@ -3,92 +3,72 @@
 #include "irc_client.h"
 #include "util.h"
 
-#include "quiz.h"
-
+#include <cstring>
 #include <vector>
-
-#include <SDL.h>
-#include <SDL_ttf.h>
 
 using namespace std;
 
 struct logger main_logger;
+struct ThreadPool main_thread_pool;
+struct quiz q;
+struct api_interface api_i;
 
 int main(int argc, char *argv[]) {
-	SDL_Init(SDL_INIT_VIDEO);
-	SDL_Event event;
-
-	TTF_Init();
+        thread_pool_init(&main_thread_pool, 10);
 
 	logger_init(&main_logger);
-	logger_level_set(&main_logger, LOG_LEVEL_ERROR);
+	logger_level_set(&main_logger, LOG_LEVEL_VERBOSE);
 	logger_write(&main_logger, LOG_LEVEL_VERBOSE, "MAIN", "start");
 
-	struct quiz q;
-	quiz_init(&q, "./custom/quiz.csv");
+        quiz_static_init();
 
-	quiz_question_window_init();
-	/*
-	quiz_question_distribution_init();
-	quiz_question_result_init();
-	quiz_result_init();
-	*/
-
-	vector<string> cfg = util_file_read("./custom/quiz.cfg");
+	vector<string> cfg = util_file_read("./quiz.cfg");
 	string channel;
+        string api_url;
+        string api_email;
+        string api_password;
+        int api_cmd_poll_freq = 2000;
 	for (int c = 0; c < cfg.size(); c++) {
 		if (cfg[c].length() > 0) {
 			vector<string> k_v = util_split(cfg[c], ";");
 			if (k_v.size() == 2) {
-				if (strstr(k_v[0].c_str(), "channel") != nullptr) {
-					channel = string(k_v[1].c_str());
-				}
+                                if (strstr(k_v[0].c_str(), "api_url") != nullptr) {
+                                        api_url = string(k_v[1].c_str());
+				} else if (strstr(k_v[0].c_str(), "api_email") != nullptr) {
+                                        api_email = string(k_v[1].c_str());
+                                } else if (strstr(k_v[0].c_str(), "api_password") != nullptr) {
+                                        api_password = string(k_v[1].c_str());
+                                } else if (strstr(k_v[0].c_str(), "api_cmd_poll_freq") != nullptr) {
+                                        api_cmd_poll_freq = stoi(k_v[1].c_str());
+                                }
 			}
 		}
-	}
+	}       
 
-	struct irc_client irc_c;
-	irc_client_init(&irc_c, "justinfan1337", "", "irc.chat.twitch.tv", 6697, "8X8ThYzPyo7QDk1mEloDT/DXEVGQ88tte3iD1F67TLg=");
-	irc_client_channel_add(&irc_c, channel);
-	irc_client_connection_establish(&irc_c);
+        api_interface_init(&api_i, api_url.c_str());
+        if (api_interface_login(&api_i, api_email.c_str(), api_password.c_str())) {
+            while (true) {
+                char *cmd_poll = api_interface_cmd_poll(&api_i);
+                if (strlen(cmd_poll) > 0) {
+                    vector<string> cmds = util_split(string(cmd_poll), "\n");
+                    for (int l = 0; l < cmds.size(); l++) {
+                        vector<string> cmd = util_split(cmds[l], ";");
+                        if (cmd.size() == 5) {
+                            quiz_cmd_enqueue(stoi(cmd[0].c_str()), stoi(cmd[1].c_str()), cmd[2].c_str(), cmd[3].c_str(), cmd[4].c_str());
+                        }
+                    }
+                }
+                logger_write(&main_logger, LOG_LEVEL_VERBOSE, "API_INTERFACE POLL", cmd_poll);
+                free(cmd_poll);
 
-	int sleep_ms = 4;
-	int nothing_new_c = 0;
+                quiz_distribution_data_send();
+                util_sleep(api_cmd_poll_freq);
+            }
+        } else {
+            logger_write(&main_logger, LOG_LEVEL_ERROR, "API_INTERFACE LOGIN", "FAILED!");
+        }
+      
+        exit(0);
 
-	struct irc_message message_current;
-
-	int sleep_ms_ct = 0;
-
-	while (true) {
-		while (SDL_PollEvent(&event) != 0) {
-			switch (event.type) {
-			case SDL_QUIT:
-				break;
-			case SDL_KEYDOWN:
-				if (event.key.keysym.sym == SDLK_RIGHT) {
-					quiz_state_next(&q);
-				} else if (event.key.keysym.sym == SDLK_LEFT) {
-					quiz_state_previous(&q);
-				}
-				break;
-			}
-		}
-
-		if (irc_client_message_next(&irc_c, &message_current)) {
-			quiz_message_parse(&q, &message_current);
-			nothing_new_c = 0;
-		} else {
-			nothing_new_c++;
-		}
-
-		util_sleep(4);
-		sleep_ms_ct += 4;
-		if (sleep_ms_ct % 1000 == 0) {
-			quiz_render(&q);
-		}
-	}
-
-	SDL_Quit();
-	
 	logger_write(&main_logger, LOG_LEVEL_VERBOSE, "MAIN", "end");
 }

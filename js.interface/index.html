@@ -1,0 +1,70 @@
+<html>
+	<head>
+		<title>twitch_quiz</title>
+		<link rel="icon" href="favicon.ico" type="image/x-icon"/>
+		<link rel="shortcut icon" href="favicon.ico" type="image/x-icon"/>
+		<link rel="stylesheet" href="css/main.css">
+		<script type="text/javascript" src="js/app.js"></script>
+		<script type="text/javascript" src="js/messagebox.js"></script>
+		<script type="text/javascript" src="js/multislider.js"></script>
+		<script type="text/javascript" src="js/db.js"></script>
+		<script type="text/javascript" src="js/widget.js"></script>
+		<script type="text/javascript" src="js/datatable.js"></script>
+		<script type="text/javascript" src="js/graph.js"></script>
+		<script type="text/javascript" src="js/autocomplete_textfield.js"></script>
+		<script type="text/javascript" src="js/suggestive_select.js"></script>
+		<script type="text/javascript" src="js/number_entry.js"></script>
+		<script type="text/javascript" src="js/widgets/user.js"></script>
+		<script type="text/javascript" src="js/widgets/menu.js"></script>
+		<script type="text/javascript" src="js/widgets/quiz.js"></script>
+		<script type="text/javascript" src="js/widgets/view.js"></script>
+	</head>
+	<body style="overflow-y: scroll;">
+	<div id="app"></div>
+	<div id="app_backend"></div>
+	
+	<script type="text/javascript">
+		var url_params = new URLSearchParams(window.location.search);
+		var param_v = url_params.get('view');
+		
+		var base_element = document.getElementById("app");
+		var backend_element = document.getElementById("app_backend");
+		backend_element.style.display = "none";
+        
+		var app = new App(base_element);
+
+		var messagebox = new MessageBox("Global");
+
+        	var db = new DB("Main");
+        	
+        	var quiz, menu, user, view;
+
+		if (param_v == null) {
+			quiz = new Quiz(db, null)
+			menu = new Menu(db, null);
+			user = new User(db, [menu, quiz]);
+
+			app.component_add(base_element, messagebox);
+			app.component_add(base_element, user);
+			app.component_add(base_element, menu);
+			app.component_add(base_element, quiz);
+		} else {
+			view = new View(db, null);
+			app.component_add(base_element, view);
+		}
+
+        function main_loop() {
+            app.update();
+            if (view != null) {
+        	setTimeout(() => {
+	        	requestAnimationFrame(main_loop);
+        	  }, 3000);
+            } else {
+	            requestAnimationFrame(main_loop);
+	    }
+        }
+
+        requestAnimationFrame(main_loop);
+	</script>
+	</body>
+</html>

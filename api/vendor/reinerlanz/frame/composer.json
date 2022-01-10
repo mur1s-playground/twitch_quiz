@@ -1,0 +1,16 @@
+{
+    "name": "reinerlanz/frame",
+    "description": "framework",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Reiner Lanz",
+            "email": "reiner.lanz@mur1.de"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {
+	    "php": ">=7.0.0"
+	},
+    "license": "0BSD"
+}

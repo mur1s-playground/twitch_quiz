@@ -1,0 +1,20 @@
+/* BROWSER_SRC URL: http://url.to.js.interface/index.html?view=channel */
+/* update js.interface/js/db.js to link to correct api-url */
+
+body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }
+#View_question_div { position: fixed; bottom: 20px; left: 20px; width: 1880px; }
+#View_question { background-color: rgba(255, 255, 255, 255); border-radius: 15px; width: 1840px; padding: 15px; margin: 10px; font-size: 40px; }
+#View_answer_a { background-color: rgba(255, 255, 255, 255); border-radius: 15px; width: 890px; padding: 10px; margin: 10px; font-size: 30px; display: inline-block; }
+#View_answer_b { background-color: rgba(255, 255, 255, 255); border-radius: 15px; width: 890px; padding: 10px; margin: 10px; font-size: 30px; display: inline-block; }
+#View_answer_c { background-color: rgba(255, 255, 255, 255); border-radius: 15px; width: 890px; padding: 10px; margin: 10px; font-size: 30px; display: inline-block; }
+#View_answer_d { background-color: rgba(255, 255, 255, 255); border-radius: 15px; width: 890px; padding: 10px; margin: 10px; font-size: 30px; display: inline-block; }
+#View_distribution { position: fixed; top: 20px; right: 20px; background-color: rgba(255, 255, 255, 255); border-radius: 15px; width: 500px; height: 550px; }
+#View_percentage_bar_a { background: linear-gradient(to right, #333, #333 calc(var(--percentage_a) * 100%), #aaa calc(var(--percentage_a) * 100%), #aaa 100%); height: 50px; width: 250px; margin: 25px; display: inline-block; }
+#View_percentage_a { background-color: rgba(200, 200, 200, 255); width: 100px; padding: 25px; font-size: 20px; display: inline-block; }
+#View_percentage_bar_b { background: linear-gradient(to right, #333, #333 calc(var(--percentage_b) * 100%), #aaa calc(var(--percentage_b) * 100%), #aaa 100%); height: 50px; width: 250px; margin: 25px; display: inline-block; }
+#View_percentage_b { background-color: rgba(200, 200, 200, 255); width: 100px; padding: 25px; font-size: 20px; display: inline-block; }
+#View_percentage_bar_c { background: linear-gradient(to right, #333, #333 calc(var(--percentage_c) * 100%), #aaa calc(var(--percentage_c) * 100%), #aaa 100%); height: 50px; width: 250px; margin: 25px; display: inline-block; }
+#View_percentage_c { background-color: rgba(200, 200, 200, 255); width: 100px; padding: 25px; font-size: 20px; display: inline-block; }
+#View_percentage_bar_d { background: linear-gradient(to right, #333, #333 calc(var(--percentage_d) * 100%), #aaa calc(var(--percentage_d) * 100%), #aaa 100%); height: 50px; width: 250px; margin: 25px; display: inline-block; }
+#View_percentage_d { background-color: rgba(200, 200, 200, 255); width: 100px; padding: 25px; font-size: 20px; display: inline-block; }
+#View_result { position: fixed; top: 20px; right: 20px; background-color: rgba(255, 255, 255, 255); border-radius: 15px; padding: 25px; font-size: 30px; }

@@ -1,0 +1,23 @@
+{
+  "modules": {
+    "namespace": "TwitchQuiz",
+    "config": "../app/config/modules.json",
+    "path": "../app/modules/",
+    "defaultModule": "object",
+    "authModule": "users",
+    "authController": "Login",
+    "authFunction": "validateLogin"
+  },
+  "dbmodel": {
+    "namespace": "TwitchQuiz",
+    "classname_prefix": "",
+    "parentpath": "../vendor/reinerlanz/frame/src/DB/",
+    "path": "/media/public/twitch_quiz/app/model/"
+  },
+  "mysql": {
+    "host" : "localhost",
+    "username" : "ilike",
+    "password" : "birds",
+    "database" : "murdelbngz013370"
+  }
+}

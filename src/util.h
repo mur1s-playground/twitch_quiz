@@ -38,4 +38,8 @@ enum util_file_type util_file_type(const char *file);
 
 void util_download_file_to(const char *url, const char *destination);
 
+long util_get_time_ms();
+
+void util_file_write(const char *filepath, const char *data);
+
 #endif
